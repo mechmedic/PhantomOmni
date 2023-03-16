@@ -10,21 +10,19 @@ CONFIG += c++17
 
 SOURCES += \
     hapticdevice.cpp \
-    main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    main.cpp
 
 HEADERS += \
-    MyGUI.h \
+    HapticDeviceGUI.h \
     hapticdevice.h \
     mainwindow.h
 
-FORMS += \
-    mainwindow.ui
+FORMS +=
 
 INCLUDEPATH += \
   "C:\OpenHaptics\Developer\3.5.0\include" \
   "C:\OpenHaptics\Developer\3.5.0\utilities\include"
-
 
 
 # Default rules for deployment.
@@ -46,3 +44,8 @@ else:unix: LIBS += -L$$PWD/../../OpenHaptics/Developer/3.5.0/lib/x64/ -lhd
 
 INCLUDEPATH += $$PWD/../../OpenHaptics/Developer/3.5.0/include
 DEPENDPATH += $$PWD/../../OpenHaptics/Developer/3.5.0/include
+
+win32:CONFIG(release, debug|release): LIBS+="WS2_32.lib"
+else:win32:CONFIG(debug, debug|release): LIBS+="WS2_32.lib"
+else:unix:
+

@@ -60,6 +60,8 @@ HapticDevice::HapticDevice()
     m_DevName[1] = "R_Arm";
     m_loopFlag = true;
     m_ntwkFlag = false;
+    m_pSocket = 0;
+    m_hdSock = 0;
 }
 
 
@@ -67,24 +69,24 @@ bool HapticDevice::InitHapticDevice()
 {
     // CKim - Initialize the device, must be done before attempting
     // to call any hd functions. We will be initializing two devices
-
     HDErrorInfo error;
+    std::ostringstream ostr;
     for(int i=0; i<OMNI_NUM; i++)
     {
-        std::ostringstream ostr;
         m_devHandle[i] = hdInitDevice(m_DevName[i].c_str());
         if (HD_DEVICE_ERROR(error = hdGetError()))
         {
             std::cerr << m_DevName[i] << " : ";
             hduPrintError(stderr, &error, "Failed to initialize haptic device");
             ostr << std::cerr.rdbuf();
-            m_errMsg = QString::fromUtf8(ostr.str().c_str());
+            m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+            emit DeviceMessage(m_deviceMsg);
             return false;
         }
-        ostr << "Found device model: "<< hdGetString(HD_DEVICE_MODEL_TYPE) << " / serial number: "<< hdGetString(HD_DEVICE_SERIAL_NUMBER) ;
-        m_errMsg = QString::fromUtf8(ostr.str().c_str());
+        ostr << "Found device model: "<< hdGetString(HD_DEVICE_MODEL_TYPE) << " / serial number: "<< hdGetString(HD_DEVICE_SERIAL_NUMBER) << std::endl;
     }
-    emit DeviceMessage(m_errMsg);
+    m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+    emit DeviceMessage(m_deviceMsg);
     return true;
 }
 
@@ -106,7 +108,7 @@ bool HapticDevice::StartHapticDevice()
     {
         hduPrintError(stderr, &error, "Failed to start the scheduler");
         ostr << std::cerr.rdbuf();
-        m_errMsg = QString::fromUtf8(ostr.str().c_str());
+        m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
         return false;
     }
 
@@ -116,9 +118,11 @@ bool HapticDevice::StartHapticDevice()
 
     memcpy(&m_prevData, &m_currentData, OMNI_NUM * sizeof(DeviceData));
 
+    // CKim - Start thread.
+    this->start();
     ostr << "Started Haptic Device";
-    m_errMsg = QString::fromUtf8(ostr.str().c_str());
-    emit DeviceMessage(m_errMsg);
+    m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+    emit DeviceMessage(m_deviceMsg);
     return true;
 }
 
@@ -137,40 +141,34 @@ bool HapticDevice::StopHapticDevice()
     {
         hduPrintError(stderr, &error, "Failed to stop the scheduler");
         ostr << std::cerr.rdbuf();
-        m_errMsg = QString::fromUtf8(ostr.str().c_str());
+        m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
         return false;
     }
     hdUnschedule(m_hUpdateHandle);
-    ostr << "Stopped Haptic Device";
-    m_errMsg = QString::fromUtf8(ostr.str().c_str());
-    emit DeviceMessage(m_errMsg);
+
+    for (int i = 0; i < OMNI_NUM; i++)    {
+        hdDisableDevice(m_devHandle[i]);
+    }
+
+    ostr << "Stopping Haptic Device";
+    m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+    emit DeviceMessage(m_deviceMsg);
     return true;
 }
 
 
-void HapticDevice::CloseHapticDevice()
+void HapticDevice::StartListen(int portNum)
 {
-    for (int i = 0; i < OMNI_NUM; i++)    {
-        hdDisableDevice(m_devHandle[i]);
-    }
-}
+    m_portNum = portNum;
 
-
-void HapticDevice::InitNetwork(int portNum)
-{
-    // CKim - Code here is based on Qt's Fortune Server and client example
-    // https://doc.qt.io/qt-5/qtnetwork-fortuneserver-example.html
-    // https://doc.qt.io/qt-5/qtnetwork-blockingfortuneclient-example.html
-    // and https://coding-chobo.tistory.com/42
-    m_pServer = new QTcpServer(this);
-
-    // CKim - Connect callback that will be executed with the new connection
-    connect(m_pServer, SIGNAL(newConnection()), this, SLOT(OnConnect()));
+    m_pServer = new QTcpServer;
+    connect(m_pServer,&QTcpServer::newConnection,this, &HapticDevice::OnConnect);
 
     // CKim - Try to listen for incoming connections
-    if (!m_pServer->listen(QHostAddress::Any, portNum))
+    if (!m_pServer->listen(QHostAddress::Any, m_portNum))
     {
         m_ntwkMsg = QString("Unable to start the server: %1.").arg(m_pServer->errorString());
+        emit NtwkMessage(m_ntwkMsg);
         return;
     }
 
@@ -193,54 +191,43 @@ void HapticDevice::InitNetwork(int portNum)
     //statusLabel->setText(tr("The server is running on\n\nIP: %1\nport: %2\n\n" "Run the Fortune Client example now.")         .arg(ipAddress).arg(tcpServer->serverPort()));
 
     m_ntwkMsg = QString("The server is running on IP: %1 port: %2").arg(ipAddress).arg(m_pServer->serverPort());
-    emit NetworkMessage(m_ntwkMsg);
+    emit NtwkMessage(m_ntwkMsg);
+}
 
 
-//    // CKim - Socket variables
-//    WSADATA wsaData;
-//    SOCKET ServSock, sock;
-//    SOCKADDR_IN servAddr, clntAddr;
+void HapticDevice::StopNetwork()
+{
+    m_ntwkFlag = false;
+    if(m_pSocket)
+    {
+        m_pSocket->disconnectFromHost();
+    }
+}
 
-//    // CKim - Winsocket Setup
-//    if (argc != 2){
-//        printf("Usage : %s <port>\n", argv[0]);
-//        exit(1);
-//    }
 
-//    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-//        ErrorHandling("WSAStartup() error!");
+void HapticDevice::OnConnect()
+{
+    // CKim - We get the handle to the socket and use WinSock functions to
+    // send data in thread. m_pSocket cannot be used in other thread.
+    m_pSocket = m_pServer->nextPendingConnection();
+    connect(m_pSocket, &QAbstractSocket::disconnected, this, &HapticDevice::OnDisconnect);
+    m_hdSock = m_pSocket->socketDescriptor();
 
-//    ServSock = socket(PF_INET, SOCK_STREAM, 0);
-//    if (ServSock == INVALID_SOCKET)
-//        ErrorHandling("socket() error");
+    m_ntwkMsg = QString( "Server accepted connection from ");
+    m_ntwkMsg += m_pSocket->peerAddress().toString();
+    emit NtwkMessage(m_ntwkMsg);
+    m_ntwkFlag = true;
+}
 
-//    sock = socket(PF_INET, SOCK_STREAM, 0);
-//    if (sock == INVALID_SOCKET)
-//        ErrorHandling("socket() error");
 
-//    BOOL bOptVal = TRUE;
-//    int bOptLen = sizeof(BOOL);
-
-//    memset(&servAddr, 0, sizeof(servAddr));
-//    servAddr.sin_family = AF_INET;
-//    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-//    //inet_addr(argv[1]);
-//    servAddr.sin_port = htons(atoi(argv[1]));
-
-//    if (bind(ServSock, (SOCKADDR*)&servAddr, sizeof(servAddr)) == SOCKET_ERROR)
-//        ErrorHandling("bind() error!");
-
-//    printf("Listening for connection\n");
-
-//    if (listen(ServSock, 1) == SOCKET_ERROR)
-//        ErrorHandling("listen() error!");
-
-//    int szclntAddr = sizeof(clntAddr);
-//    sock = accept(ServSock, (SOCKADDR*)&clntAddr, &szclntAddr);
-//    if (sock == INVALID_SOCKET)
-//        ErrorHandling("accept() error!");
-
-//    printf("Server accepted connection\n");
+void HapticDevice::OnDisconnect()
+{
+    // CKim - Stop sending and delete socket
+    m_ntwkFlag = false;
+    m_pSocket->deleteLater();//QObject::deleteLater();
+    m_hdSock = 0;
+    m_ntwkMsg = QString("Host disconnected");
+    emit NtwkMessage(m_ntwkMsg);
 }
 
 
@@ -254,14 +241,15 @@ void HapticDevice::run()
     double prevOrt[3][3];		double currOrt[3][3];		double deltaOrt[3][3];
     int cnt = 0;
 
+    int sum = 0;
+
     // -----------------------------------------------------------
     // CKim - run the main loop
     while (m_loopFlag)
     {
         // CKim - Perform a synchronous call to copy the most current device state.
         // This synchronous scheduler call ensures that the device state is obtained in a thread-safe manner.
-        hdScheduleSynchronous(copyDeviceDataCallback,
-            m_currentData, HD_MIN_SCHEDULER_PRIORITY);
+        hdScheduleSynchronous(copyDeviceDataCallback, m_currentData, HD_MIN_SCHEDULER_PRIORITY);
 
         // CKim - Check if an error occurred.
         for (int i = 0; i < OMNI_NUM; i++)
@@ -272,8 +260,8 @@ void HapticDevice::run()
                 std::cerr << m_DevName[i] << " : ";
                 hduPrintError(stderr, &m_currentData[i].m_error, "Device error detected");
                 ostr << std::cerr.rdbuf();
-                m_errMsg = QString::fromUtf8(ostr.str().c_str());
-                emit DeviceMessage(m_errMsg);
+                m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+                emit DeviceMessage(m_deviceMsg);
                 break;
             }
 
@@ -283,72 +271,67 @@ void HapticDevice::run()
                 std::cerr << m_DevName[i] << " : ";
                 hduPrintError(stderr, &m_currentData[i].m_error, "Scheduler error detected");
                 ostr << std::cerr.rdbuf();
-                m_errMsg = QString::fromUtf8(ostr.str().c_str());
-                emit DeviceMessage(m_errMsg);
+                m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+                emit DeviceMessage(m_deviceMsg);
                 break;
             }
         }
 
-        // CKim - Process Data
-
-        // CKim - Send data over network
-        if(m_ntwkFlag)
-        {
-            m_pSocket->write((char*)deltaL, 6 * sizeof(double));
-
-            //            // CKim - Send data over network
-//            send(sock, (char*)deltaL, 6 * sizeof(double), 0);
-//            send(sock, &btnL, sizeof(char), 0);
-//            send(sock, (char*)deltaR, 6 * sizeof(double), 0);
-//            send(sock, &btnR, sizeof(char), 0);
-
-
-
-//            //! [5]
-//                QByteArray block;
-//                QDataStream out(&block, QIODevice::WriteOnly);
-//                out.setVersion(QDataStream::Qt_5_10);
-
-//                out << fortunes[QRandomGenerator::global()->bounded(fortunes.size())];
-
-//                clientConnection->write(block);
-//                clientConnection->disconnectFromHost();
-//            //! [5]
-
-
-
+        // CKim - Process Data.
+        // CKim - Calculate position (mm) difference.
+        for (int i = 0; i < 3; i++)	{
+            deltaL[i] = m_currentData[0].m_devicePosition[i] - m_prevData[0].m_devicePosition[i];
+            deltaR[i] = m_currentData[1].m_devicePosition[i] - m_prevData[1].m_devicePosition[i];
+        }
+        // CKim - Just send current gimbal angles in radian.
+        for (int i = 0; i < 3; i++) {
+            deltaL[i + 3] = m_currentData[0].m_gimbalAngle[i] - m_prevData[0].m_gimbalAngle[i];
+            deltaR[i + 3] = m_currentData[1].m_gimbalAngle[i] - m_prevData[1].m_gimbalAngle[i];
         }
 
         // CKim - Store off the current data for the next loop.
         memcpy(&m_prevData, &m_currentData, OMNI_NUM * sizeof(DeviceData));
+
+        // CKim - Send data over network
+        if(m_ntwkFlag)
+        {
+            // CKim - Send Data. We need to use native socket API of the OS.
+            // QtTcpSocket will not work in this thread.
+            //int res = m_pSocket->write((char*)deltaL, 6 * sizeof(double));
+            int res = send(m_hdSock,(char*)deltaL, 6 * sizeof(double),0);
+            if(res == -1)
+            {
+                std::ostringstream ostr;
+                ostr << "Socket Write Error";
+                m_ntwkMsg = QString::fromUtf8(ostr.str().c_str());
+                emit NtwkMessage(m_ntwkMsg);
+                m_ntwkFlag = false;
+            }
+        }
     }
 
     return;
 }
 
 
-void HapticDevice::OnConnect()
-{
-    // We then call QTcpServer::nextPendingConnection(), which returns the QTcpSocket representing the server side of the connection.
-    // By connecting QTcpSocket::disconnected() to QObject::deleteLater(), we ensure that the socket will be deleted after disconnecting.
-    m_pSocket = m_pServer->nextPendingConnection();
-    connect(m_pSocket, &QAbstractSocket::disconnected, m_pSocket, &QObject::deleteLater);
-
-    std::ostringstream ostr;
-    ostr << "Server accepted connection from ";
-    m_ntwkMsg = QString::fromUtf8(ostr.str().c_str());
-    emit NetworkMessage(m_ntwkMsg);
-    m_ntwkFlag = true;
-}
 
 
-void HapticDevice::StopNetwork()
-{
-    if(m_pSocket)
-    {
-        m_pSocket->disconnectFromHost();
-    }
-}
+
+
+//            sum+=res;
+            //msleep(10);
+//            std::ostringstream ostr;
+//            ostr << "Wrote " << sum << " bytes.";
+//            m_deviceMsg = QString::fromUtf8(ostr.str().c_str());
+//            emit DeviceMessage(m_deviceMsg);
+
+            //
+
+            //            // CKim - Send data over network
+//            send(sock, (char*)deltaL, 6 * sizeof(double), 0);
+//            send(sock, &btnL, sizeof(char), 0);
+//            send(sock, (char*)deltaR, 6 * sizeof(double), 0);
+//            send(sock, &btnR, sizeof(char), 0);
 
 
 //    btnL = btnR = 0;
@@ -470,3 +453,53 @@ void HapticDevice::StopNetwork()
 
 //    //
 
+
+
+
+
+
+//    // CKim - Socket variables
+//    WSADATA wsaData;
+//    SOCKET ServSock, sock;
+//    SOCKADDR_IN servAddr, clntAddr;
+
+//    // CKim - Winsocket Setup
+//    if (argc != 2){
+//        printf("Usage : %s <port>\n", argv[0]);
+//        exit(1);
+//    }
+
+//    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+//        ErrorHandling("WSAStartup() error!");
+
+//    ServSock = socket(PF_INET, SOCK_STREAM, 0);
+//    if (ServSock == INVALID_SOCKET)
+//        ErrorHandling("socket() error");
+
+//    sock = socket(PF_INET, SOCK_STREAM, 0);
+//    if (sock == INVALID_SOCKET)
+//        ErrorHandling("socket() error");
+
+//    BOOL bOptVal = TRUE;
+//    int bOptLen = sizeof(BOOL);
+
+//    memset(&servAddr, 0, sizeof(servAddr));
+//    servAddr.sin_family = AF_INET;
+//    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+//    //inet_addr(argv[1]);
+//    servAddr.sin_port = htons(atoi(argv[1]));
+
+//    if (bind(ServSock, (SOCKADDR*)&servAddr, sizeof(servAddr)) == SOCKET_ERROR)
+//        ErrorHandling("bind() error!");
+
+//    printf("Listening for connection\n");
+
+//    if (listen(ServSock, 1) == SOCKET_ERROR)
+//        ErrorHandling("listen() error!");
+
+//    int szclntAddr = sizeof(clntAddr);
+//    sock = accept(ServSock, (SOCKADDR*)&clntAddr, &szclntAddr);
+//    if (sock == INVALID_SOCKET)
+//        ErrorHandling("accept() error!");
+
+//    printf("Server accepted connection\n");
